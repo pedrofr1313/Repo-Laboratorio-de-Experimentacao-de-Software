@@ -1,36 +1,33 @@
 import requests
-import json
 import csv
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+import statistics
+import time
 
 # Carregar variáveis de ambiente
 load_dotenv()
 
-
-class GitHubAnalyzer:
+class GitHubAnalyzerMVP:
     def __init__(self):
         self.token = os.getenv('GITHUB_TOKEN')
         if not self.token:
-            raise ValueError("Token GitHub não encontrado. Configure GITHUB_TOKEN no arquivo .env")
-
+            raise ValueError("Configure GITHUB_TOKEN no arquivo .env")
+        
         self.headers = {
             'Authorization': f'Bearer {self.token}',
             'Content-Type': 'application/json'
         }
         self.graphql_url = 'https://api.github.com/graphql'
 
-    def create_graphql_query(self, cursor=None):
-        """
-        Cria query GraphQL para buscar os top 100 repositórios mais populares
-        Inclui todas as métricas necessárias para as RQs
-        """
+    def create_query(self, cursor=None):
+        """Query GraphQL com suporte a paginação"""
         after_cursor = f', after: "{cursor}"' if cursor else ''
-
-        query = f"""
+        
+        return f"""
         query {{
-          search(query: "stars:>1", type: REPOSITORY, first: 100{after_cursor}) {{
+          search(query: "stars:>1000 sort:stars-desc", type: REPOSITORY, first: 10{after_cursor}) {{
             edges {{
               node {{
                 ... on Repository {{
@@ -67,471 +64,246 @@ class GitHubAnalyzer:
           }}
         }}
         """
-        return query
 
-    def make_graphql_request(self, query):
-        """
-        Faz requisição GraphQL para a API do GitHub
-        """
-        response = requests.post(
-            self.graphql_url,
-            headers=self.headers,
-            json={'query': query}
-        )
-
-        if response.status_code != 200:
-            raise Exception(f"Erro na requisição: {response.status_code} - {response.text}")
-
-        return response.json()
-
-    def calculate_repository_age(self, created_at):
-        """
-        Calcula a idade do repositório em dias
-        """
-        created_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-        current_date = datetime.now(created_date.tzinfo)
-        return (current_date - created_date).days
-
-    def calculate_days_since_last_update(self, updated_at):
-        """
-        Calcula quantos dias desde a última atualização
-        """
-        updated_date = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
-        current_date = datetime.now(updated_date.tzinfo)
-        return (current_date - updated_date).days
-
-    def process_repository_data(self, repo):
-        """
-        Processa os dados de um repositório e calcula as métricas
-        """
-        # RQ01: Idade do repositório
-        age_days = self.calculate_repository_age(repo['createdAt'])
-
-        # RQ02: Pull requests aceitas (merged)
-        merged_prs = repo['pullRequests']['totalCount']
-
-        # RQ03: Total de releases
-        total_releases = repo['releases']['totalCount']
-
-        # RQ04: Dias desde última atualização
-        days_since_update = self.calculate_days_since_last_update(repo['updatedAt'])
-
-        # RQ05: Linguagem primária
-        primary_language = repo['primaryLanguage']['name'] if repo['primaryLanguage'] else 'Unknown'
-
-        # RQ06: Percentual de issues fechadas
-        total_issues = repo['issues']['totalCount']
-        closed_issues = repo['closedIssues']['totalCount']
-        closed_issues_ratio = (closed_issues / total_issues * 100) if total_issues > 0 else 0
-
-        return {
-            'name': repo['name'],
-            'owner': repo['owner']['login'],
-            'url': repo['url'],
-            'stars': repo['stargazerCount'],
-            'created_at': repo['createdAt'],
-            'updated_at': repo['updatedAt'],
-            'age_days': age_days,  # RQ01
-            'merged_pull_requests': merged_prs,  # RQ02
-            'total_releases': total_releases,  # RQ03
-            'days_since_last_update': days_since_update,  # RQ04
-            'primary_language': primary_language,  # RQ05
-            'total_issues': total_issues,
-            'closed_issues': closed_issues,
-            'closed_issues_percentage': round(closed_issues_ratio, 2)  # RQ06
-        }
-
-    def fetch_top_repositories(self, limit=1000):
-        """
-        Busca os top repositórios mais populares com paginação
-        Lab01S01: 100 repos | Lab01S02: 1000 repos
-        """
-        repositories = []
+    def fetch_repositories(self):
+        """Faz 10 requisições de 10 repositórios cada para buscar 100 total"""
+        print("🔄 Buscando 100 repositórios mais populares (10 páginas de 10)...")
+        
+        all_repositories = []
         cursor = None
-        page_count = 0
-        max_per_request = 100  # Máximo permitido pela API do GitHub
+        page = 1
+        max_pages = 10  # 10 páginas de 10 = 100 repositórios
+        
+        while page <= max_pages:
+            print(f"📄 Página {page}/10 - Buscando repositórios {(page-1)*10 + 1}-{page*10}...")
+            
+            query = self.create_query(cursor)
+            response = requests.post(
+                self.graphql_url,
+                headers=self.headers,
+                json={'query': query}
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"Erro na requisição página {page}: {response.status_code} - {response.text}")
+            
+            data = response.json()
+            
+            if 'errors' in data:
+                raise Exception(f"Erro GraphQL página {page}: {data['errors']}")
+            
+            # Adicionar repositórios desta página à lista total
+            edges = data['data']['search']['edges']
+            all_repositories.extend(edges)
+            
+            print(f"   ✅ {len(edges)} repositórios coletados (Total: {len(all_repositories)})")
+            
+            # Verificar se há próxima página
+            page_info = data['data']['search']['pageInfo']
+            if not page_info['hasNextPage'] or len(all_repositories) >= 100:
+                print(f"🏁 Paginação finalizada na página {page}")
+                break
+            
+            # Configurar cursor para próxima página
+            cursor = page_info['endCursor']
+            page += 1
+            
+            # Rate limiting - pequena pausa entre requisições
+            time.sleep(0.5)  # 500ms entre requisições
+        
+        print(f"✅ Total coletado: {len(all_repositories)} repositórios")
+        return all_repositories
 
-        print(f"Iniciando coleta de {limit} repositórios mais populares...")
-        print("🔄 Implementando paginação para grandes volumes de dados...")
+    def calculate_age_days(self, created_at):
+        """RQ01: Calcula idade do repositório em dias"""
+        created_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+        return (datetime.now(created_date.tzinfo) - created_date).days
 
-        while len(repositories) < limit:
-            page_count += 1
+    def calculate_days_since_update(self, updated_at):
+        """RQ04: Calcula dias desde última atualização"""
+        updated_date = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+        return (datetime.now(updated_date.tzinfo) - updated_date).days
 
-            # Calcular quantos repos precisamos nesta requisição
-            remaining = limit - len(repositories)
-            repos_to_fetch = min(max_per_request, remaining)
-
-            print(f"\n📄 Página {page_count} - Buscando {repos_to_fetch} repositórios...")
-            print(f"   Progresso: {len(repositories)}/{limit} repositórios coletados")
-
-            query = self.create_graphql_query_paginated(cursor, repos_to_fetch)
-
-            try:
-                result = self.make_graphql_request(query)
-
-                if 'errors' in result:
-                    print(f"❌ Erro na query GraphQL: {result['errors']}")
-                    # Tentar continuar mesmo com erro
-                    if 'data' not in result:
-                        break
-
-                # Verificar se temos dados válidos
-                if 'data' not in result or 'search' not in result['data']:
-                    print("❌ Resposta inválida da API")
-                    break
-
-                edges = result['data']['search']['edges']
-
-                if not edges:
-                    print("⚠️  Nenhum repositório encontrado nesta página")
-                    break
-
-                # Processar repositórios desta página
-                repos_processed = 0
-                for edge in edges:
-                    if len(repositories) >= limit:
-                        break
-
-                    try:
-                        repo_data = self.process_repository_data(edge['node'])
-                        repositories.append(repo_data)
-                        repos_processed += 1
-                    except Exception as e:
-                        print(f"⚠️  Erro ao processar repositório: {e}")
-                        continue
-
-                print(f"✅ Processados {repos_processed} repositórios nesta página")
-
-                # Verificar paginação
-                page_info = result['data']['search']['pageInfo']
-
-                if not page_info['hasNextPage'] or len(repositories) >= limit:
-                    print("🏁 Última página alcançada ou limite atingido")
-                    break
-
-                cursor = page_info['endCursor']
-
-                # Rate limiting - pausa entre requisições
-                if page_count % 5 == 0:  # A cada 5 páginas
-                    print("⏱️  Pausa para rate limiting...")
-                    import time
-                    time.sleep(2)
-
-            except Exception as e:
-                print(f"❌ Erro na requisição da página {page_count}: {e}")
-                print("🔄 Tentando continuar...")
-
-                # Tentar continuar com próxima página se possível
-                if cursor:
-                    continue
-                else:
-                    break
-
-        print(f"\n🎉 Coleta finalizada!")
-        print(f"📊 Total de repositórios coletados: {len(repositories)}")
-        print(f"📄 Total de páginas processadas: {page_count}")
-
+    def process_repositories(self, edges):
+        """Processa dados dos repositórios e calcula métricas das RQs"""
+        repositories = []
+        
+        print("📊 Processando dados e calculando métricas das RQs...")
+        
+        for i, edge in enumerate(edges, 1):
+            repo = edge['node']
+            
+            # RQ01: Idade do repositório
+            age_days = self.calculate_age_days(repo['createdAt'])
+            
+            # RQ02: Pull requests aceitas (merged)
+            merged_prs = repo['pullRequests']['totalCount']
+            
+            # RQ03: Total de releases
+            total_releases = repo['releases']['totalCount']
+            
+            # RQ04: Dias desde última atualização
+            days_since_update = self.calculate_days_since_update(repo['updatedAt'])
+            
+            # RQ05: Linguagem primária
+            primary_language = repo['primaryLanguage']['name'] if repo['primaryLanguage'] else 'Unknown'
+            
+            # RQ06: Percentual de issues fechadas
+            total_issues = repo['issues']['totalCount']
+            closed_issues = repo['closedIssues']['totalCount']
+            closed_issues_percentage = (closed_issues / total_issues * 100) if total_issues > 0 else 0
+            
+            repo_data = {
+                'name': repo['name'],
+                'owner': repo['owner']['login'],
+                'url': repo['url'],
+                'stars': repo['stargazerCount'],
+                'age_days': age_days,
+                'merged_pull_requests': merged_prs,
+                'total_releases': total_releases,
+                'days_since_last_update': days_since_update,
+                'primary_language': primary_language,
+                'total_issues': total_issues,
+                'closed_issues': closed_issues,
+                'closed_issues_percentage': round(closed_issues_percentage, 2)
+            }
+            
+            repositories.append(repo_data)
+            
+            # Progress indicator
+            if i % 25 == 0:
+                print(f"   ✅ Processados {i}/{len(edges)} repositórios")
+        
         return repositories
 
-    def create_graphql_query_paginated(self, cursor=None, first=100):
-        """
-        Cria query GraphQL otimizada para paginação
-        """
-        after_cursor = f', after: "{cursor}"' if cursor else ''
-
-        query = f"""
-        query {{
-          search(query: "stars:>1", type: REPOSITORY, first: {first}{after_cursor}) {{
-            edges {{
-              node {{
-                ... on Repository {{
-                  name
-                  owner {{
-                    login
-                  }}
-                  createdAt
-                  updatedAt
-                  stargazerCount
-                  primaryLanguage {{
-                    name
-                  }}
-                  pullRequests(states: MERGED) {{
-                    totalCount
-                  }}
-                  releases {{
-                    totalCount
-                  }}
-                  issues {{
-                    totalCount
-                  }}
-                  closedIssues: issues(states: CLOSED) {{
-                    totalCount
-                  }}
-                  url
-                  description
-                }}
-              }}
-            }}
-            pageInfo {{
-              endCursor
-              hasNextPage
-              startCursor
-            }}
-            repositoryCount
-          }}
-        }}
-        """
-        return query
-
-    def save_to_csv_with_backup(self, repositories, filename='data/repositories_data.csv'):
-        """
-        Salva os dados em CSV com sistema de backup para grandes volumes
-        """
-        # Criar diretório data se não existir
-        os.makedirs('data', exist_ok=True)
-
-        # Sistema de backup
-        backup_filename = filename.replace('.csv', f'_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
-
+    def save_to_csv(self, repositories, filename='repositories_data.csv'):
+        """Salva dados em CSV"""
         fieldnames = [
-            'name', 'owner', 'url', 'stars', 'created_at', 'updated_at',
+            'name', 'owner', 'url', 'stars', 
             'age_days', 'merged_pull_requests', 'total_releases',
-            'days_since_last_update', 'primary_language', 'total_issues',
-            'closed_issues', 'closed_issues_percentage'
+            'days_since_last_update', 'primary_language',
+            'total_issues', 'closed_issues', 'closed_issues_percentage'
         ]
+        
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(repositories)
+        
+        print(f"💾 Dados salvos em: {filename}")
 
-        # Salvar arquivo principal
-        try:
-            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(repositories)
-
-            print(f"✅ Dados salvos em: {filename}")
-
-            # Criar backup
-            with open(backup_filename, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(repositories)
-
-            print(f"💾 Backup criado em: {backup_filename}")
-
-        except Exception as e:
-            print(f"❌ Erro ao salvar arquivo: {e}")
-            # Tentar salvar pelo menos o backup
-            try:
-                with open(backup_filename, 'w', newline='', encoding='utf-8') as csvfile:
-                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(repositories)
-                print(f"💾 Dados salvos no backup: {backup_filename}")
-            except Exception as backup_error:
-                print(f"❌ Erro crítico ao salvar backup: {backup_error}")
-
-    def save_checkpoint(self, repositories, checkpoint_num):
-        """
-        Salva checkpoint durante a coleta para evitar perda de dados
-        """
-        filename = f'data/checkpoint_{checkpoint_num}_{len(repositories)}_repos.csv'
-        try:
-            self.save_to_csv(repositories, filename)
-            print(f"💾 Checkpoint salvo: {filename}")
-        except Exception as e:
-            print(f"⚠️  Erro ao salvar checkpoint: {e}")
-
-    def load_existing_data(self, filename='data/repositories_data.csv'):
-        """
-        Carrega dados existentes para continuar coleta se necessário
-        """
-        if os.path.exists(filename):
-            try:
-                repositories = []
-                with open(filename, 'r', encoding='utf-8') as csvfile:
-                    reader = csv.DictReader(csvfile)
-                    for row in reader:
-                        # Converter strings numéricas de volta para int/float
-                        row['age_days'] = int(row['age_days'])
-                        row['merged_pull_requests'] = int(row['merged_pull_requests'])
-                        row['total_releases'] = int(row['total_releases'])
-                        row['days_since_last_update'] = int(row['days_since_last_update'])
-                        row['total_issues'] = int(row['total_issues'])
-                        row['closed_issues'] = int(row['closed_issues'])
-                        row['closed_issues_percentage'] = float(row['closed_issues_percentage'])
-                        row['stars'] = int(row['stars'])
-                        repositories.append(row)
-
-                print(f"📂 Dados existentes carregados: {len(repositories)} repositórios")
-                return repositories
-            except Exception as e:
-                print(f"⚠️  Erro ao carregar dados existentes: {e}")
-
-        return []
-
-    def print_detailed_stats(self, repositories):
-        """
-        Exibe estatísticas detalhadas dos dados coletados
-        """
-        total_repos = len(repositories)
-        print(f"\n{'=' * 60}")
-        print(f"📊 RELATÓRIO DETALHADO - {total_repos} REPOSITÓRIOS")
-        print(f"{'=' * 60}")
-
-        # RQ01: Idade dos repositórios
+    def print_summary(self, repositories):
+        """Mostra resumo básico dos dados coletados"""
+        print(f"\n{'='*50}")
+        print(f"📊 RESUMO DOS DADOS COLETADOS")
+        print(f"{'='*50}")
+        print(f"Total de repositórios: {len(repositories)}")
+        
+        # RQ01 - Idade
         ages = [repo['age_days'] for repo in repositories]
-        ages_sorted = sorted(ages)
-        median_age = ages_sorted[len(ages_sorted) // 2]
-
-        print(f"\n🕐 RQ01 - IDADE DOS REPOSITÓRIOS:")
-        print(f"   Mediana: {median_age} dias ({median_age / 365:.1f} anos)")
-        print(f"   Mais antigo: {max(ages)} dias ({max(ages) / 365:.1f} anos)")
-        print(f"   Mais novo: {min(ages)} dias ({min(ages) / 365:.1f} anos)")
-
-        # RQ02: Pull Requests
+        print(f"\nRQ01 - Estatísticas das idades dos repositórios:")
+        print(f"  Média: {statistics.mean(ages):.2f} dias")
+        print(f"  Mediana: {statistics.median(ages)} dias")
+        try:
+            print(f"  Moda: {statistics.mode(ages)} dias")
+        except statistics.StatisticsError:
+            print(f"  Moda: Não há valor único mais comum")
+        
+        # RQ02 - Pull Requests aceitas
         prs = [repo['merged_pull_requests'] for repo in repositories]
-        prs_sorted = sorted(prs)
-        median_prs = prs_sorted[len(prs_sorted) // 2]
+        print(f"\nRQ02 - Pull Requests aceitas:")
+        print(f"  Mediana: {statistics.median(prs)}")
+        print(f"  Média: {statistics.mean(prs):.2f}")
+        try:
+            print(f"  Moda: {statistics.mode(prs)}")
+        except statistics.StatisticsError:
+            print(f"  Moda: Não há valor único mais comum")
 
-        print(f"\n🔄 RQ02 - PULL REQUESTS ACEITAS:")
-        print(f"   Mediana: {median_prs}")
-        print(f"   Máximo: {max(prs)}")
-        print(f"   Repositórios com 0 PRs: {sum(1 for pr in prs if pr == 0)}")
-
-        # RQ03: Releases
+        # RQ03 - Releases
         releases = [repo['total_releases'] for repo in repositories]
-        releases_sorted = sorted(releases)
-        median_releases = releases_sorted[len(releases_sorted) // 2]
+        print(f"\nRQ03 - Total de releases:")
+        print(f"  Mediana: {statistics.median(releases)}")
+        print(f"  Média: {statistics.mean(releases):.2f}")
+        try:
+            print(f"  Moda: {statistics.mode(releases)}")
+        except statistics.StatisticsError:
+            print(f"  Moda: Não há valor único mais comum")
+        print(f"  Repositórios sem releases: {sum(1 for r in releases if r == 0)}")
 
-        print(f"\n🚀 RQ03 - TOTAL DE RELEASES:")
-        print(f"   Mediana: {median_releases}")
-        print(f"   Máximo: {max(releases)}")
-        print(f"   Repositórios sem releases: {sum(1 for r in releases if r == 0)}")
-
-        # RQ04: Última atualização
+        # RQ04 - Última atualização
         updates = [repo['days_since_last_update'] for repo in repositories]
-        updates_sorted = sorted(updates)
-        median_update = updates_sorted[len(updates_sorted) // 2]
+        print(f"\nRQ04 - Dias desde última atualização:")
+        print(f"  Mediana: {statistics.median(updates)} dias")
+        print(f"  Média: {statistics.mean(updates):.2f} dias")
+        try:
+            print(f"  Moda: {statistics.mode(updates)} dias")
+        except statistics.StatisticsError:
+            print(f"  Moda: Não há valor único mais comum")
+        print(f"  Atualizados recentemente (≤30 dias): {sum(1 for u in updates if u <= 30)} repos")
 
-        print(f"\n🔄 RQ04 - DIAS DESDE ÚLTIMA ATUALIZAÇÃO:")
-        print(f"   Mediana: {median_update} dias")
-        print(f"   Mais desatualizado: {max(updates)} dias")
-        print(f"   Atualizados hoje: {sum(1 for u in updates if u == 0)}")
-
-        # RQ05: Linguagens
+        # RQ05 - Linguagens
         languages = {}
         for repo in repositories:
             lang = repo['primary_language']
             languages[lang] = languages.get(lang, 0) + 1
 
-        print(f"\n💻 RQ05 - LINGUAGENS DE PROGRAMAÇÃO:")
-        print(f"   Total de linguagens diferentes: {len(languages)}")
-        print(f"   TOP 10 linguagens:")
-        for i, (lang, count) in enumerate(sorted(languages.items(), key=lambda x: x[1], reverse=True)[:10], 1):
-            percentage = (count / total_repos) * 100
-            print(f"     {i:2d}. {lang:<15} {count:4d} repos ({percentage:5.1f}%)")
+        print(f"\nRQ05 - Linguagens mais populares:")
+        top_langs = sorted(languages.items(), key=lambda x: x[1], reverse=True)[:5]
+        for lang, count in top_langs:
+            print(f"  {lang}: {count} repositórios")
 
-        # RQ06: Issues fechadas
-        issue_ratios = [repo['closed_issues_percentage'] for repo in repositories]
-        issue_ratios_sorted = sorted(issue_ratios)
-        median_ratio = issue_ratios_sorted[len(issue_ratios_sorted) // 2]
-
-        print(f"\n🐛 RQ06 - PERCENTUAL DE ISSUES FECHADAS:")
-        print(f"   Mediana: {median_ratio:.1f}%")
-        print(f"   Repositórios com 100% issues fechadas: {sum(1 for r in issue_ratios if r == 100.0)}")
-        print(f"   Repositórios sem issues: {sum(1 for repo in repositories if repo['total_issues'] == 0)}")
-
-        # Estatísticas gerais
-        total_stars = sum(repo['stars'] for repo in repositories)
-        print(f"\n⭐ ESTATÍSTICAS GERAIS:")
-        print(f"   Total de estrelas: {total_stars:,}")
-        print(
-            f"   Estrelas por repositório (mediana): {sorted([r['stars'] for r in repositories])[total_repos // 2]:,}")
-
-        print(f"\n{'=' * 60}")
-
-    def save_to_csv(self, repositories, filename='data/repositories_data.csv'):
-
-        self.save_to_csv_with_backup(repositories, filename)
-
+        # RQ06 - Issues fechadas
+        closed_percentages = [repo['closed_issues_percentage'] for repo in repositories]
+        print(f"\nRQ06 - Issues fechadas:")
+        print(f"  Percentual mediano: {statistics.median(closed_percentages):.2f}%")
+        print(f"  Percentual médio: {statistics.mean(closed_percentages):.2f}%")
+        try:
+            print(f"  Moda: {statistics.mode(closed_percentages)}%")
+        except statistics.StatisticsError:
+            print(f"  Moda: Não há valor único mais comum")
+        print(f"  100% fechadas: {sum(1 for repo in repositories if repo['closed_issues_percentage'] == 100)} repos")
+                
+        print(f"\n{'='*50}")
 
 def main():
-    """
-    Função principal - Lab01S01 e Lab01S02
-    """
+    """Função principal do MVP - Lab01S01"""
+    print("🚀 GitHub Analyzer MVP - Lab01S01")
+    print("Objetivo: Coletar 100 repositórios mais populares")
+    print("Métricas: RQ01-RQ06\n")
+    
     try:
-        analyzer = GitHubAnalyzer()
-
-        # Verificar se queremos continuar coleta existente
-        existing_data = analyzer.load_existing_data()
-
-        if existing_data and len(existing_data) > 0:
-            print(f"🔄 Encontrados {len(existing_data)} repositórios existentes")
-            response = input("Deseja continuar a coleta ou recomeçar? (c/r): ").lower()
-
-            if response == 'c':
-                print("📊 Continuando com dados existentes...")
-                repositories = existing_data
-                if len(repositories) >= 1000:
-                    print("✅ Coleta já completa!")
-                    analyzer.print_detailed_stats(repositories)
-                    return
-            else:
-                print("🔄 Recomeçando coleta...")
-                repositories = []
-        else:
-            repositories = []
-
-        # Determinar quantos repositórios coletar
-        if len(repositories) == 0:
-            # Lab01S01: Começar com 100
-            print("🚀 Lab01S01: Coletando primeiros 100 repositórios...")
-            target = 100
-        else:
-            # Lab01S02: Expandir para 1000
-            print("🚀 Lab01S02: Expandindo para 1000 repositórios...")
-            target = 1000
-
-        # Coletar dados
-        if len(repositories) < target:
-            remaining_repos = analyzer.fetch_top_repositories(target)
-
-            # Se estamos continuando, mesclar dados
-            if repositories:
-                # Evitar duplicatas baseado na URL
-                existing_urls = {repo['url'] for repo in repositories}
-                new_repos = [repo for repo in remaining_repos if repo['url'] not in existing_urls]
-                repositories.extend(new_repos)
-                print(f"📊 Mesclados {len(new_repos)} novos repositórios")
-            else:
-                repositories = remaining_repos
-
-        # Salvar dados com backup
-        analyzer.save_to_csv_with_backup(repositories)
-
-        # Checkpoint a cada 200 repositórios
-        if len(repositories) >= 200:
-            analyzer.save_checkpoint(repositories, "final")
-
-        # Exibir estatísticas detalhadas
-        analyzer.print_detailed_stats(repositories)
-
-        # Status do laboratório
-        if len(repositories) >= 100 and len(repositories) < 1000:
-            print("\n✅ Lab01S01 concluído com sucesso!")
-            print("🎯 Próximo passo: Lab01S02 - Execute novamente para coletar 1000 repositórios")
-        elif len(repositories) >= 1000:
-            print("\n🎉 Lab01S02 concluído com sucesso!")
-            print("📈 Pronto para Lab01S03 - Análise e visualização de dados")
-
-        print(f"📁 Dados salvos em: data/repositories_data.csv")
-
-    except KeyboardInterrupt:
-        print("\n⏹️  Coleta interrompida pelo usuário")
-        print("💾 Dados coletados até agora foram preservados")
+        # Verificar se arquivo .env existe
+        if not os.path.exists('.env'):
+            print("❌ Arquivo .env não encontrado!")
+            print("💡 Crie um arquivo .env com: GITHUB_TOKEN=seu_token_aqui")
+            return
+        
+        # Inicializar analisador
+        analyzer = GitHubAnalyzerMVP()
+        
+        # Buscar repositórios
+        edges = analyzer.fetch_repositories()
+        print(f"✅ {len(edges)} repositórios encontrados")
+        
+        # Processar dados
+        repositories = analyzer.process_repositories(edges)
+        print(f"✅ {len(repositories)} repositórios processados")
+        
+        # Salvar em CSV
+        analyzer.save_to_csv(repositories)
+        
+        # Mostrar resumo
+        analyzer.print_summary(repositories)
+        
+        print("\n🎉 Lab01S01 concluído com sucesso!")
+        print("📈 Dados prontos para análise das RQs")
+        
+    except ValueError as e:
+        print(f"❌ Erro de configuração: {e}")
+        print("💡 Verifique se o token GitHub está configurado no arquivo .env")
     except Exception as e:
         print(f"❌ Erro: {e}")
-        print("💡 Dica: Verifique seu token GitHub e conexão com internet")
-
+        print("💡 Verifique sua conexão e token GitHub")
 
 if __name__ == "__main__":
     main()
