@@ -2,6 +2,13 @@
 
 Este projeto é parte do laboratório **Lab01S01** da disciplina de Engenharia de Software. O objetivo principal é analisar características de **repositórios populares open-source** utilizando a API GraphQL do GitHub.
 
+## 👥 Integrantes
+
+- **Gabriel Pongelupe de Carvalho**
+- **Pedro Araújo Franco**
+
+---
+
 ## 🎯 Objetivo
 
 Investigar as seguintes **Questões de Pesquisa (RQs)** com base em dados reais dos **1.000 repositórios com mais estrelas no GitHub**:
