@@ -66,16 +66,16 @@ class GitHubAnalyzerMVP:
         """
 
     def fetch_repositories(self):
-        """Faz 10 requisições de 10 repositórios cada para buscar 100 total"""
-        print("🔄 Buscando 100 repositórios mais populares (10 páginas de 10)...")
+        """Faz 100 requisições de 10 repositórios cada para buscar 1000 total"""
+        print("🔄 Buscando 1000 repositórios mais populares (100 páginas de 10)...")
         
         all_repositories = []
         cursor = None
         page = 1
-        max_pages = 10  # 10 páginas de 10 = 100 repositórios
+        max_pages = 100  # 100 páginas de 10 = 1000 repositórios
         
         while page <= max_pages:
-            print(f"📄 Página {page}/10 - Buscando repositórios {(page-1)*10 + 1}-{page*10}...")
+            print(f"📄 Página {page}/100 - Buscando repositórios {(page-1)*10 + 1}-{page*10}...")
             
             query = self.create_query(cursor)
             response = requests.post(
@@ -100,7 +100,7 @@ class GitHubAnalyzerMVP:
             
             # Verificar se há próxima página
             page_info = data['data']['search']['pageInfo']
-            if not page_info['hasNextPage'] or len(all_repositories) >= 100:
+            if not page_info['hasNextPage'] or len(all_repositories) >= 1000:
                 print(f"🏁 Paginação finalizada na página {page}")
                 break
             
@@ -171,7 +171,7 @@ class GitHubAnalyzerMVP:
             repositories.append(repo_data)
             
             # Progress indicator
-            if i % 25 == 0:
+            if i % 100 == 0:
                 print(f"   ✅ Processados {i}/{len(edges)} repositórios")
         
         return repositories
@@ -268,7 +268,7 @@ class GitHubAnalyzerMVP:
 def main():
     """Função principal do MVP - Lab01S01"""
     print("🚀 GitHub Analyzer MVP - Lab01S01")
-    print("Objetivo: Coletar 100 repositórios mais populares")
+    print("Objetivo: Coletar 1000 repositórios mais populares")
     print("Métricas: RQ01-RQ06\n")
     
     try:
